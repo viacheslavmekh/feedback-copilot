@@ -56,3 +56,4 @@ gh repo create feedback-copilot --public --source=. --remote=origin --push
 Файл `.env` з вашим API ключем НЕ буде завантажено в GitHub (він в `.gitignore`).
 Тільки `.env.example` буде в репозиторії.
 
+

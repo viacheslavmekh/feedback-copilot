@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import AssignmentSelector from './components/AssignmentSelector'
 
 // Simple markdown formatter
 function formatMarkdown(text) {
@@ -254,10 +255,6 @@ function App() {
 
 {{task}}
 
-### EVALUATION CRITERIA:
-
-{{criteria}}
-
 ### STUDENT WORK:
 
 {{content}}
@@ -271,7 +268,7 @@ function App() {
   const [file, setFile] = useState(null)
   const [googleDocsLink, setGoogleDocsLink] = useState('')
   const [assignmentText, setAssignmentText] = useState('')
-  const [evaluationCriteria, setEvaluationCriteria] = useState('')
+  const [selectedAssignmentId, setSelectedAssignmentId] = useState(null)
   const [customPrompt, setCustomPrompt] = useState(defaultPromptTemplate)
   const [useCustomPrompt, setUseCustomPrompt] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -298,6 +295,7 @@ function App() {
 
     try {
       let content = ''
+      let contentType = null
 
       // If file is uploaded, process it first
       if (file) {
@@ -317,10 +315,25 @@ function App() {
 
         const uploadData = await uploadResponse.json()
         content = uploadData.content
+        
+        // Determine content type from file
+        const fileName = file.name.toLowerCase()
+        if (fileName.endsWith('.pdf')) {
+          contentType = 'pdf'
+        } else if (['.png', '.jpg', '.jpeg'].some(ext => fileName.endsWith(ext))) {
+          contentType = 'image'
+        }
       } else if (googleDocsLink) {
         // For Google Docs link, pass it directly - server will fetch the content
         setLoadingStep('Fetching Google Docs content...')
         content = googleDocsLink
+        
+        // Determine if it's Docs or Slides
+        if (googleDocsLink.includes('/presentation/')) {
+          contentType = 'google-slides'
+        } else if (googleDocsLink.includes('/document/')) {
+          contentType = 'google-docs'
+        }
       } else {
         throw new Error('Please provide either a file or Google Docs link')
       }
@@ -339,8 +352,8 @@ function App() {
         },
         body: JSON.stringify({
           task: assignmentText,
-          criteria: evaluationCriteria,
           content: content,
+          contentType: contentType,
           customPrompt: useCustomPrompt && customPrompt.trim() ? customPrompt : undefined,
         }),
       })
@@ -410,6 +423,24 @@ function App() {
         </div>
 
         <div style={styles.card}>
+          <div style={styles.cardIcon}>📚</div>
+          <div style={styles.cardContent}>
+            <AssignmentSelector
+              value={selectedAssignmentId}
+              onChange={(assignment) => {
+                if (assignment) {
+                  setSelectedAssignmentId(assignment.id);
+                  setAssignmentText(assignment.details);
+                } else {
+                  setSelectedAssignmentId(null);
+                }
+              }}
+              disabled={loading}
+            />
+          </div>
+        </div>
+
+        <div style={styles.card}>
           <div style={styles.cardIcon}>📝</div>
           <div style={styles.cardContent}>
             <label style={styles.label}>
@@ -421,24 +452,7 @@ function App() {
               rows={8}
               disabled={loading}
               style={styles.textarea}
-              placeholder="Enter the assignment description..."
-            />
-          </div>
-        </div>
-
-        <div style={styles.card}>
-          <div style={styles.cardIcon}>✓</div>
-          <div style={styles.cardContent}>
-            <label style={styles.label}>
-              Evaluation criteria (optional)
-            </label>
-            <textarea
-              value={evaluationCriteria}
-              onChange={(e) => setEvaluationCriteria(e.target.value)}
-              rows={8}
-              disabled={loading}
-              style={styles.textarea}
-              placeholder="Enter the evaluation criteria (optional)..."
+              placeholder="Enter the assignment description or select from Airtable above..."
             />
           </div>
         </div>

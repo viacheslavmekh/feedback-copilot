@@ -14,6 +14,11 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Airtable configuration
+const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
+const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
+const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME || 'Homework_database';
+
 // Middleware
 app.use(cors());
 app.use(express.json());
@@ -131,6 +136,63 @@ async function fetchGoogleDocsContent(url) {
   }
 }
 
+// GET /api/airtable/homeworks - Fetch homeworks from Airtable
+app.get('/api/airtable/homeworks', async (req, res) => {
+  try {
+    if (!AIRTABLE_API_KEY || !AIRTABLE_BASE_ID) {
+      return res.status(500).json({
+        error: 'Airtable configuration is missing. Please set AIRTABLE_API_KEY and AIRTABLE_BASE_ID in .env file.',
+      });
+    }
+
+    let allRecords = [];
+    let offset = null;
+    const baseUrl = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${AIRTABLE_TABLE_NAME}`;
+    
+    // Handle pagination - Airtable returns max 100 records per request
+    do {
+      let url = baseUrl;
+      if (offset) {
+        url += `?offset=${offset}`;
+      }
+      
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${AIRTABLE_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('Airtable API error:', response.status, errorText);
+        return res.status(response.status).json({
+          error: `Failed to fetch from Airtable: ${response.statusText}`,
+        });
+      }
+
+      const data = await response.json();
+      allRecords = allRecords.concat(data.records);
+      offset = data.offset || null;
+    } while (offset);
+    
+    // Transform Airtable records to our format
+    const homeworks = allRecords.map(record => ({
+      id: record.id,
+      name: record.fields.Homework_name || 'Untitled',
+      details: record.fields.Homework_details || '',
+    }));
+
+    res.json({ homeworks });
+  } catch (error) {
+    console.error('Error fetching from Airtable:', error);
+    res.status(500).json({
+      error: `Failed to fetch homeworks: ${error.message}`,
+    });
+  }
+});
+
 // POST /api/upload - Handle file uploads
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
@@ -189,9 +251,27 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   }
 });
 
+// Helper function to get content type description
+function getContentTypeDescription(contentType) {
+  const descriptions = {
+    'pdf': 'PDF файл',
+    'image': 'зображення (PNG, JPG)',
+    'google-docs': 'Google Docs документ',
+    'google-slides': 'Google Slides презентація'
+  };
+  return descriptions[contentType] || 'документ';
+}
+
 // Helper function to generate default prompt
-function generateDefaultPrompt(task, criteria, content, isImage = false) {
+function generateDefaultPrompt(task, content, isImage = false, contentType = null) {
   const studentWorkPlaceholder = isImage ? '[Робота студента надана як зображення нижче]' : content;
+  
+  // Add content type information
+  let contentTypeNote = '';
+  if (contentType) {
+    const typeDesc = getContentTypeDescription(contentType);
+    contentTypeNote = `\n\n**ВАЖЛИВО:** Робота студента надана у вигляді ${typeDesc}. Враховуй це при аналізі та не рекомендуй створювати те, що вже надано (наприклад, якщо надана презентація, не рекомендуй "створи презентацію").\n`;
+  }
   
   return `# SYSTEM PROMPT: Feedback Co-Pilot (версія з урахуванням реального стилю)
 
@@ -351,13 +431,8 @@ function generateDefaultPrompt(task, criteria, content, isImage = false) {
 
 ### ASSIGNMENT:
 
-${task}
-
-${criteria ? `### EVALUATION CRITERIA:
-
-${criteria}
-
-` : ''}### STUDENT WORK:
+${task}${contentTypeNote}
+### STUDENT WORK:
 
 ${studentWorkPlaceholder}
 
@@ -371,7 +446,7 @@ ${studentWorkPlaceholder}
 // POST /api/analyze - Analyze content and generate feedback
 app.post('/api/analyze', async (req, res) => {
   try {
-    let { task, criteria, content, customPrompt } = req.body;
+    let { task, content, contentType, customPrompt } = req.body;
 
     if (!task || !content) {
       return res.status(400).json({
@@ -380,13 +455,38 @@ app.post('/api/analyze', async (req, res) => {
     }
 
     // Check if content is a Google Docs or Slides link and fetch it
+    // IMPORTANT: This must happen BEFORE processing custom prompt placeholders
+    const originalContent = content;
+    let detectedContentType = contentType;
+    
     if (typeof content === 'string' && content.includes('docs.google.com')) {
       try {
+        console.log('Fetching Google Docs/Slides content from:', content.substring(0, 50) + '...');
+        
+        // Detect type from URL if not provided
+        if (!detectedContentType) {
+          if (content.includes('/presentation/')) {
+            detectedContentType = 'google-slides';
+          } else if (content.includes('/document/')) {
+            detectedContentType = 'google-docs';
+          }
+        }
+        
         content = await fetchGoogleDocsContent(content);
+        console.log('Google Docs content fetched, length:', content.length);
+        console.log('First 200 chars of fetched content:', content.substring(0, 200));
       } catch (error) {
+        console.error('Error fetching Google Docs:', error);
         return res.status(400).json({
           error: `Failed to fetch Google Docs/Slides content: ${error.message}`,
         });
+      }
+    }
+    
+    // If content type is still not determined, try to detect from content
+    if (!detectedContentType) {
+      if (typeof content === 'string' && content.startsWith('data:image')) {
+        detectedContentType = 'image';
       }
     }
 
@@ -396,7 +496,7 @@ app.post('/api/analyze', async (req, res) => {
     let prompt;
     let parts = [];
 
-    // Check if content is a base64 image
+    // Check if content is a base64 image (must be after Google Docs fetch)
     const isImage = typeof content === 'string' && content.startsWith('data:image');
     
     // Generate prompt - use custom if provided, otherwise use default
@@ -405,21 +505,77 @@ app.post('/api/analyze', async (req, res) => {
       // Replace placeholders in custom prompt
       let processedPrompt = customPrompt;
       
-      // Handle optional criteria - replace or remove section
-      if (criteria && criteria.trim()) {
-        processedPrompt = processedPrompt.replace(/\{\{criteria\}\}/g, criteria);
-      } else {
-        // Remove criteria section if not provided
-        processedPrompt = processedPrompt.replace(/\{\{criteria\}\}/g, '');
-        // Remove empty criteria section lines
-        processedPrompt = processedPrompt.replace(/### EVALUATION CRITERIA:\s*\n\s*\n/g, '');
+      // Remove criteria section if it exists in custom prompt
+      processedPrompt = processedPrompt.replace(/\{\{criteria\}\}/g, '');
+      processedPrompt = processedPrompt.replace(/### EVALUATION CRITERIA:\s*\n\s*\n/g, '');
+      processedPrompt = processedPrompt.replace(/### EVALUATION CRITERIA:\s*\n\s*### STUDENT WORK:/g, '### STUDENT WORK:');
+      
+      // Replace task and content placeholders
+      // Note: content is already fetched from Google Docs if it was a link (done above)
+      const contentForPrompt = isImage ? '[Робота студента надана як зображення нижче]' : (content || '');
+      
+      // Add content type information for custom prompt
+      let contentTypeNote = '';
+      if (detectedContentType) {
+        const typeDesc = getContentTypeDescription(detectedContentType);
+        contentTypeNote = `\n\n**ВАЖЛИВО:** Робота студента надана у вигляді ${typeDesc}. Враховуй це при аналізі та не рекомендуй створювати те, що вже надано (наприклад, якщо надана презентація, не рекомендуй "створи презентацію").\n`;
+      }
+      
+      console.log('=== Custom prompt processing ===');
+      console.log('- Original content was Google Docs link:', originalContent && typeof originalContent === 'string' && originalContent.includes('docs.google.com'));
+      console.log('- Content type:', detectedContentType);
+      console.log('- Content type after processing:', typeof content);
+      console.log('- Content length:', contentForPrompt.length);
+      console.log('- Content preview (first 150 chars):', contentForPrompt.substring(0, 150));
+      console.log('- Custom prompt length:', processedPrompt.length);
+      console.log('- Custom prompt contains {{content}}:', processedPrompt.includes('{{content}}'));
+      console.log('- Custom prompt contains {{task}}:', processedPrompt.includes('{{task}}'));
+      
+      // Perform replacements
+      // Add content type note before STUDENT WORK section if it exists
+      if (contentTypeNote && processedPrompt.includes('STUDENT WORK')) {
+        processedPrompt = processedPrompt.replace(
+          /(### STUDENT WORK:)/,
+          contentTypeNote + '$1'
+        );
+      } else if (contentTypeNote && processedPrompt.includes('{{content}}')) {
+        // If no STUDENT WORK section, add note before {{content}}
+        processedPrompt = processedPrompt.replace(
+          /(\{\{content\}\})/,
+          contentTypeNote + '$1'
+        );
       }
       
       promptText = processedPrompt
-        .replace(/\{\{task\}\}/g, task)
-        .replace(/\{\{content\}\}/g, isImage ? '[Робота студента надана як зображення нижче]' : content);
+        .replace(/\{\{task\}\}/g, task || '')
+        .replace(/\{\{content\}\}/g, contentForPrompt);
+      
+      // Verify replacements
+      const hasContentAfterReplacement = !promptText.includes('{{content}}');
+      const hasTaskAfterReplacement = !promptText.includes('{{task}}');
+      
+      console.log('- After replacement:');
+      console.log('  * {{content}} replaced:', hasContentAfterReplacement);
+      console.log('  * {{task}} replaced:', hasTaskAfterReplacement);
+      console.log('  * Final prompt length:', promptText.length);
+      
+      // Check if content is actually in the prompt
+      if (hasContentAfterReplacement && contentForPrompt.length > 0) {
+        const studentWorkIndex = promptText.indexOf('STUDENT WORK');
+        if (studentWorkIndex !== -1) {
+          const contentAfterLabel = promptText.substring(studentWorkIndex + 20, studentWorkIndex + 250);
+          console.log('  * Content after "STUDENT WORK" label (first 230 chars):', contentAfterLabel);
+        } else {
+          console.log('  * WARNING: "STUDENT WORK" label not found in prompt!');
+        }
+      } else if (!hasContentAfterReplacement) {
+        console.log('  * ERROR: {{content}} was NOT replaced!');
+      } else if (contentForPrompt.length === 0) {
+        console.log('  * WARNING: Content for prompt is empty!');
+      }
+      console.log('=== End custom prompt processing ===');
     } else {
-      promptText = generateDefaultPrompt(task, criteria || '', content, isImage);
+      promptText = generateDefaultPrompt(task, content, isImage, detectedContentType);
     }
 
     if (isImage) {
