@@ -18,6 +18,7 @@ const PORT = process.env.PORT || 3000;
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME || 'Homework_database';
+const AIRTABLE_PROFILES_TABLE_NAME = process.env.AIRTABLE_PROFILES_TABLE_NAME || 'Student_profiles';
 
 // Middleware
 app.use(cors());
@@ -193,6 +194,63 @@ app.get('/api/airtable/homeworks', async (req, res) => {
   }
 });
 
+// GET /api/airtable/profiles - Fetch student profiles from Airtable
+app.get('/api/airtable/profiles', async (req, res) => {
+  try {
+    if (!AIRTABLE_API_KEY || !AIRTABLE_BASE_ID) {
+      return res.status(500).json({
+        error: 'Airtable configuration is missing. Please set AIRTABLE_API_KEY and AIRTABLE_BASE_ID in .env file.',
+      });
+    }
+
+    let allRecords = [];
+    let offset = null;
+    const baseUrl = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${AIRTABLE_PROFILES_TABLE_NAME}`;
+    
+    // Handle pagination - Airtable returns max 100 records per request
+    do {
+      let url = baseUrl;
+      if (offset) {
+        url += `?offset=${offset}`;
+      }
+      
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${AIRTABLE_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('Airtable API error:', response.status, errorText);
+        return res.status(response.status).json({
+          error: `Failed to fetch from Airtable: ${response.statusText}`,
+        });
+      }
+
+      const data = await response.json();
+      allRecords = allRecords.concat(data.records);
+      offset = data.offset || null;
+    } while (offset);
+    
+    // Transform Airtable records to our format
+    const profiles = allRecords.map(record => ({
+      id: record.id,
+      profile: record.fields.Profile || 'Untitled',
+      recommendations: record.fields.Key_recommendations || '',
+    }));
+
+    res.json({ profiles });
+  } catch (error) {
+    console.error('Error fetching from Airtable:', error);
+    res.status(500).json({
+      error: `Failed to fetch profiles: ${error.message}`,
+    });
+  }
+});
+
 // POST /api/upload - Handle file uploads
 app.post('/api/upload', upload.single('file'), async (req, res) => {
   try {
@@ -263,7 +321,7 @@ function getContentTypeDescription(contentType) {
 }
 
 // Helper function to generate default prompt
-function generateDefaultPrompt(task, content, isImage = false, contentType = null) {
+function generateDefaultPrompt(task, content, isImage = false, contentType = null, studentProfileNotes = null) {
   const studentWorkPlaceholder = isImage ? '[Робота студента надана як зображення нижче]' : content;
   
   // Add content type information
@@ -271,6 +329,12 @@ function generateDefaultPrompt(task, content, isImage = false, contentType = nul
   if (contentType) {
     const typeDesc = getContentTypeDescription(contentType);
     contentTypeNote = `\n\n**ВАЖЛИВО:** Робота студента надана у вигляді ${typeDesc}. Враховуй це при аналізі та не рекомендуй створювати те, що вже надано (наприклад, якщо надана презентація, не рекомендуй "створи презентацію").\n`;
+  }
+  
+  // Add student profile notes if provided
+  let profileNotesSection = '';
+  if (studentProfileNotes && studentProfileNotes.trim()) {
+    profileNotesSection = `\n\n### ПОРАДИ З УРАХУВАННЯМ ПРОФІЛЮ СТУДЕНТА:\n\n${studentProfileNotes.trim()}\n`;
   }
   
   return `# SYSTEM PROMPT: Feedback Co-Pilot (версія з урахуванням реального стилю)
@@ -431,8 +495,7 @@ function generateDefaultPrompt(task, content, isImage = false, contentType = nul
 
 ### ASSIGNMENT:
 
-${task}${contentTypeNote}
-### STUDENT WORK:
+${task}${contentTypeNote}${profileNotesSection}### STUDENT WORK:
 
 ${studentWorkPlaceholder}
 
@@ -446,7 +509,7 @@ ${studentWorkPlaceholder}
 // POST /api/analyze - Analyze content and generate feedback
 app.post('/api/analyze', async (req, res) => {
   try {
-    let { task, content, contentType, customPrompt } = req.body;
+    let { task, content, contentType, studentProfileNotes, customPrompt } = req.body;
 
     if (!task || !content) {
       return res.status(400).json({
@@ -521,6 +584,12 @@ app.post('/api/analyze', async (req, res) => {
         contentTypeNote = `\n\n**ВАЖЛИВО:** Робота студента надана у вигляді ${typeDesc}. Враховуй це при аналізі та не рекомендуй створювати те, що вже надано (наприклад, якщо надана презентація, не рекомендуй "створи презентацію").\n`;
       }
       
+      // Add student profile notes for custom prompt
+      let profileNotesSection = '';
+      if (studentProfileNotes && studentProfileNotes.trim()) {
+        profileNotesSection = `\n\n### ПОРАДИ З УРАХУВАННЯМ ПРОФІЛЮ СТУДЕНТА:\n\n${studentProfileNotes.trim()}\n`;
+      }
+      
       console.log('=== Custom prompt processing ===');
       console.log('- Original content was Google Docs link:', originalContent && typeof originalContent === 'string' && originalContent.includes('docs.google.com'));
       console.log('- Content type:', detectedContentType);
@@ -532,18 +601,24 @@ app.post('/api/analyze', async (req, res) => {
       console.log('- Custom prompt contains {{task}}:', processedPrompt.includes('{{task}}'));
       
       // Perform replacements
-      // Add content type note before STUDENT WORK section if it exists
-      if (contentTypeNote && processedPrompt.includes('STUDENT WORK')) {
+      // Add content type note and profile notes before STUDENT WORK section if it exists
+      const combinedNotes = contentTypeNote + profileNotesSection;
+      if (combinedNotes && processedPrompt.includes('STUDENT WORK')) {
         processedPrompt = processedPrompt.replace(
           /(### STUDENT WORK:)/,
-          contentTypeNote + '$1'
+          combinedNotes + '$1'
         );
-      } else if (contentTypeNote && processedPrompt.includes('{{content}}')) {
-        // If no STUDENT WORK section, add note before {{content}}
+      } else if (combinedNotes && processedPrompt.includes('{{content}}')) {
+        // If no STUDENT WORK section, add notes before {{content}}
         processedPrompt = processedPrompt.replace(
           /(\{\{content\}\})/,
-          contentTypeNote + '$1'
+          combinedNotes + '$1'
         );
+      } else {
+        // If neither section found, add notes at the end before content placeholder
+        if (combinedNotes) {
+          processedPrompt = processedPrompt + combinedNotes;
+        }
       }
       
       promptText = processedPrompt
@@ -575,7 +650,7 @@ app.post('/api/analyze', async (req, res) => {
       }
       console.log('=== End custom prompt processing ===');
     } else {
-      promptText = generateDefaultPrompt(task, content, isImage, detectedContentType);
+      promptText = generateDefaultPrompt(task, content, isImage, detectedContentType, studentProfileNotes);
     }
 
     if (isImage) {

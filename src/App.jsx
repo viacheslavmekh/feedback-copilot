@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import AssignmentSelector from './components/AssignmentSelector'
+import ProfileSelector from './components/ProfileSelector'
 
 // Simple markdown formatter
 function formatMarkdown(text) {
@@ -269,6 +270,8 @@ function App() {
   const [googleDocsLink, setGoogleDocsLink] = useState('')
   const [assignmentText, setAssignmentText] = useState('')
   const [selectedAssignmentId, setSelectedAssignmentId] = useState(null)
+  const [studentProfileNotes, setStudentProfileNotes] = useState('')
+  const [selectedProfileId, setSelectedProfileId] = useState(null)
   const [customPrompt, setCustomPrompt] = useState(defaultPromptTemplate)
   const [useCustomPrompt, setUseCustomPrompt] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -354,6 +357,7 @@ function App() {
           task: assignmentText,
           content: content,
           contentType: contentType,
+          studentProfileNotes: studentProfileNotes.trim() || undefined,
           customPrompt: useCustomPrompt && customPrompt.trim() ? customPrompt : undefined,
         }),
       })
@@ -385,39 +389,36 @@ function App() {
       
       <form onSubmit={handleSubmit} style={styles.form}>
         <div style={styles.card}>
-          <div style={styles.cardIcon}>📄</div>
+          <div style={styles.cardIcon}>👤</div>
           <div style={styles.cardContent}>
-            <label style={styles.label}>
-              Upload File (PDF, PNG, JPG)
-            </label>
-            <input
-              type="file"
-              accept=".pdf,.png,.jpg,.jpeg"
-              onChange={handleFileChange}
-              disabled={loading || !!googleDocsLink}
-              style={styles.fileInput}
+            <ProfileSelector
+              value={selectedProfileId}
+              onChange={(profile) => {
+                if (profile) {
+                  setSelectedProfileId(profile.id);
+                  setStudentProfileNotes(profile.recommendations);
+                } else {
+                  setSelectedProfileId(null);
+                }
+              }}
+              disabled={loading}
             />
           </div>
         </div>
 
         <div style={styles.card}>
-          <div style={styles.cardIcon}>🔗</div>
+          <div style={styles.cardIcon}>📋</div>
           <div style={styles.cardContent}>
             <label style={styles.label}>
-              Google Docs or Slides Link
+              Student profile notes
             </label>
-            <input
-              type="text"
-              value={googleDocsLink}
-              onChange={(e) => {
-                setGoogleDocsLink(e.target.value)
-                if (e.target.value) {
-                  setFile(null)
-                }
-              }}
-              placeholder="https://docs.google.com/document/... or https://docs.google.com/presentation/..."
-              disabled={loading || !!file}
-              style={styles.textInput}
+            <textarea
+              value={studentProfileNotes}
+              onChange={(e) => setStudentProfileNotes(e.target.value)}
+              rows={6}
+              disabled={loading}
+              style={styles.textarea}
+              placeholder="Enter student profile recommendations or select from Airtable above..."
             />
           </div>
         </div>
@@ -453,6 +454,44 @@ function App() {
               disabled={loading}
               style={styles.textarea}
               placeholder="Enter the assignment description or select from Airtable above..."
+            />
+          </div>
+        </div>
+
+        <div style={styles.card}>
+          <div style={styles.cardIcon}>🔗</div>
+          <div style={styles.cardContent}>
+            <label style={styles.label}>
+              Google Docs or Slides Link
+            </label>
+            <input
+              type="text"
+              value={googleDocsLink}
+              onChange={(e) => {
+                setGoogleDocsLink(e.target.value)
+                if (e.target.value) {
+                  setFile(null)
+                }
+              }}
+              placeholder="https://docs.google.com/document/... or https://docs.google.com/presentation/..."
+              disabled={loading || !!file}
+              style={styles.textInput}
+            />
+          </div>
+        </div>
+
+        <div style={styles.card}>
+          <div style={styles.cardIcon}>📄</div>
+          <div style={styles.cardContent}>
+            <label style={styles.label}>
+              Upload File (PDF, PNG, JPG)
+            </label>
+            <input
+              type="file"
+              accept=".pdf,.png,.jpg,.jpeg"
+              onChange={handleFileChange}
+              disabled={loading || !!googleDocsLink}
+              style={styles.fileInput}
             />
           </div>
         </div>
